@@ -64,7 +64,7 @@ pub struct ObjectType {
     pub deform: Option<MeshData>,
     /// `[collision_mesh]`: what vehicles actually hit (often much plainer than the model).
     pub collision: Option<MeshData>,
-    /// A plain object that is only paint at its foot ([`paint_at_foot`]).
+    /// Ordinary scenery that is only paint at its foot ([`paint_at_foot`]).
     pub paint: bool,
     /// What of the type stops the outside camera (decided on first use).
     pub camera: std::sync::OnceLock<crate::camera_arm::BlockerShape>,
@@ -630,7 +630,7 @@ const SPLINE_SHADOW_CLEARANCE: f32 = 0.75;
 /// canopy - is no ground surface: it neither cuts the terrain nor carries anything.
 const SPLINE_OVERHEAD: f32 = 2.0;
 
-/// Whether a plain object (no `[rendertype]`, no `[surface]`) is only paint at its foot:
+/// Whether ordinary scenery is only paint at its foot, independently of its render queue:
 /// every point of every mesh between 5 cm under and 25 cm over its origin, all of them
 /// within 5 cm of height (a plate standing upright - a line plate on a bridge rail, a stop's
 /// name plate - is a sign, not paint; the mesh pivots are for animations, not for the
@@ -640,11 +640,18 @@ const SPLINE_OVERHEAD: f32 = 2.0;
 /// towards the eye by their depth bias instead, and an object lying that close over one
 /// went under it: a depot's parking bays were all gone (#1009).
 fn paint_at_foot(sco: &SceneryObject, meshes: &[(MeshData, Vec<omsi_o3d::Material>, Vec<MaterialDef>)]) -> bool {
-    if !matches!(sco.render_type, omsi_scenery::sco::RenderType::Normal) || sco.surface || meshes.is_empty() || meshes.iter().any(|(m, _, _)| m.positions.is_empty()) {
+    if scenery_ground_surface(sco) || meshes.is_empty() || meshes.iter().any(|(m, _, _)| m.positions.is_empty()) {
         return false;
     }
     let (lo, hi) = meshes.iter().flat_map(|(m, _, _)| m.positions.iter()).fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p.z), hi.max(p.z)));
     lo >= -0.05 && hi <= 0.25 && hi - lo <= 0.05
+}
+
+/// Numeric render queues order ordinary scenery; only the named ground passes and
+/// `[surface]` classify an object as ground geometry.
+fn scenery_ground_surface(sco: &SceneryObject) -> bool {
+    use omsi_scenery::sco::RenderType;
+    sco.surface || matches!(sco.render_type, RenderType::PreSurface | RenderType::Surface | RenderType::OnSurface)
 }
 
 fn scenery_render_phase(kind: omsi_scenery::sco::RenderType) -> RenderPhase {
@@ -5043,8 +5050,7 @@ impl World {
                 }
                 continue;
             }
-            let is_surface = !matches!(ot.sco.render_type, omsi_scenery::sco::RenderType::Normal)
-                || ot.sco.surface;
+            let is_surface = scenery_ground_surface(&ot.sco);
             if check_objects && is_surface {
                 let over = pos.z - ground_at(pos.x, pos.y);
                 if !(-1.0..=3.0).contains(&over) {
@@ -5583,10 +5589,9 @@ impl World {
                             continue;
                         }
                         // Laid on the ground (the terrain is cut under it): a `[surface]` object
-                        // and one drawn as a ground layer (`[rendertype]`).
-                        let surface =
-                            !matches!(ot.sco.render_type, omsi_scenery::sco::RenderType::Normal)
-                                || ot.sco.surface;
+                        // and one drawn in a named ground pass (`[rendertype]`). Numeric
+                        // queues also contain upright props, which must not cut terrain.
+                        let surface = scenery_ground_surface(&ot.sco);
                         if !surface {
                             continue;
                         }
@@ -7165,9 +7170,7 @@ impl World {
                         let t = &gpu.types[&tkey];
                         (t.meshes.clone(), t.variants.clone(), t.lods.clone(), t.auto_night, t.lod0_lo, t.lod0_max, t.terrain_slots.clone())
                     };
-                    let surface =
-                        !matches!(ot.sco.render_type, omsi_scenery::sco::RenderType::Normal)
-                            || ot.sco.surface;
+                    let surface = scenery_ground_surface(&ot.sco);
                     let render_phase = scenery_render_phase(ot.sco.render_type);
                     let has_lower = !type_lods.is_empty();
                     let mut lamp_instances = Vec::new();
@@ -7600,6 +7603,7 @@ impl World {
                             || ot.model.meshes.iter().any(|m| m.no_distance_check);
                         let near_only = stand_in_area(&ot, &xf, pos, (p.tx, p.ty));
                         for inst in all_instances.iter().chain(&lod_instances) {
+                            scene.instances[*inst].render_phase = render_phase;
                             scene.instances[*inst].presurface =
                                 ot.sco.render_type == omsi_scenery::sco::RenderType::PreSurface;
                             renderer.set_object_culling(scene, *inst, radius, detail, any_distance);
@@ -13790,6 +13794,10 @@ mod tests {
 #[cfg(test)]
 #[path = "scene/terrain_mapping_tests.rs"]
 mod terrain_mapping_tests;
+
+#[cfg(test)]
+#[path = "scene/scenery_surface_tests.rs"]
+mod scenery_surface_tests;
 
 #[cfg(test)]
 mod material_tests {

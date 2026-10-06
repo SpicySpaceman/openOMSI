@@ -2101,6 +2101,8 @@ pub struct Renderer {
     /// The same, multisampled: the enhanced main pass's own depth laid first (see
     /// `render_inner`), so that its costly shading runs once per visible surface.
     prepass_msaa_pipelines: Option<[wgpu::RenderPipeline; 6]>,
+    /// Depth-only pipelines compatible with the existing HDR colour pass.
+    presurface_msaa_pipelines: Option<[wgpu::RenderPipeline; 4]>,
     /// Ambient occlusion and its blur; none on OpenGL (GLES), whose shading language cannot
     /// read a depth texture texel by texel - the pipelines failed there, AO off or not (#422).
     ssao_pipeline: Option<wgpu::RenderPipeline>,
@@ -3037,6 +3039,7 @@ impl Renderer {
             ao_buf: ssao.buf,
             prepass_pipelines: prepass.pipelines,
             prepass_msaa_pipelines: prepass.msaa_pipelines,
+            presurface_msaa_pipelines: prepass.presurface_pipelines,
             ssao_pipeline: ssao.ssao_pipeline,
             blur_pipeline: ssao.blur_pipeline,
             fog_lamps_pipeline: fog_lamps.pipeline,
@@ -10516,6 +10519,7 @@ mod tests {
                 },
             ))
             .expect("test renderer");
+            renderer.profiling = true;
             let mut scene = renderer.new_scene();
             let green = renderer.add_material(
                 &mut scene,
@@ -10580,6 +10584,11 @@ mod tests {
                 vec![transparent],
             );
             scene.instances[cover].presurface = true;
+            // A normal opaque object lies between the excavation floor and its cover.
+            // Prefilling its depth before the floor's colour erases the excavation, even
+            // though the cover will reject that object's later colour draw.
+            let background_mesh = quad(&renderer, &mut scene, 7.0, 2.0);
+            renderer.add_instance(&mut scene, background_mesh, DVec3::ZERO, Mat4::IDENTITY, vec![red]);
             let foreground_mesh = quad(&renderer, &mut scene, 2.0, 0.25);
             let foreground = renderer.add_instance(
                 &mut scene,
@@ -10603,6 +10612,15 @@ mod tests {
             let rgba = renderer
                 .render_to_image(&mut scene, 64, 64, &camera, &lighting)
                 .unwrap();
+            if enhanced && renderer.options.msaa > 1 {
+                assert!(renderer.counts.borrow().get("msaa prepass batches").copied().unwrap_or(0.0) > 0.0,
+                    "an excavation must not disable depth prefilling for the rest of the view");
+            }
+            let saved = renderer.prepass_msaa_pipelines.take();
+            let reference = renderer.render_to_image(&mut scene, 64, 64, &camera, &lighting).unwrap();
+            renderer.prepass_msaa_pipelines = saved;
+            assert!(rgba.iter().zip(&reference).all(|(a, b)| a.abs_diff(*b) <= 2),
+                "presurface depth optimization changed the image: {msaa}/{ssao}/{enhanced}");
             let centre = pixel(&rgba, 32);
             assert!(
                 centre[2] > centre[1] + 40,

@@ -9478,6 +9478,104 @@ mod tests {
         assert!(glare_veil(&lights, DVec3::ZERO, eye.position.as_vec3(), eye.forward()) > 1e-5);
     }
 
+    #[test]
+    #[ignore = "requires a graphics adapter; evaluates artificial lamp receivers"]
+    fn back_facing_lamps_skip_shadow_sampling_but_keep_bounce_and_foliage() {
+        // Evaluate the production lighting function, with a deterministic shadow lookup
+        // that counts calls. No game assets or duplicate lighting implementation.
+        let function = |source: &str, name: &str| -> String {
+            let start = source.find(&format!("fn {name}(")).unwrap();
+            let tail = &source[start..];
+            tail[..tail.find("\n}\n").unwrap() + 3].to_string()
+        };
+        let enhanced = include_str!("enhanced.wgsl");
+        let mut shader = r#"
+const PI: f32 = 3.14159265;
+const CELL_CAP: u32 = 1u;
+struct PointLight { pos: vec4<f32>, color: vec4<f32>, dir: vec4<f32>, extra: vec4<f32> };
+struct Surface { albedo: vec3<f32>, f0: vec3<f32>, rough: f32 };
+struct Camera { light_grid: vec4<f32> };
+struct Enhanced { lights: vec4<f32>, weather: vec4<f32> };
+var<private> camera: Camera;
+var<private> enh: Enhanced;
+var<private> lights: array<PointLight, 1>;
+var<private> grid: array<u32, 1>;
+var<private> calls: u32;
+@group(0) @binding(0) var<storage, read_write> output: array<vec4<f32>>;
+fn lamp_shadow_at(li: u32, p: vec3<f32>, n: vec3<f32>, thin: bool) -> f32 {
+    calls = calls + 1u;
+    return 0.25;
+}
+"#.to_string();
+        for name in ["d_ggx", "v_smith", "f_schlick", "lamp_light"] {
+            shader.push_str(&function(enhanced, name));
+        }
+        shader.push_str(&function(include_str!("lamp_air.wgsl"), "headlamp"));
+        shader.push_str(r#"
+@compute @workgroup_size(1) fn check(@builtin(global_invocation_id) id: vec3<u32>) {
+    camera.light_grid = vec4<f32>(-12.5, -12.5, 25.0, 1.0);
+    enh.lights = vec4<f32>(0.0, 1.0, 0.0, 0.0);
+    enh.weather = vec4<f32>(0.0);
+    lights[0] = PointLight(vec4<f32>(0.0, 0.0, 4.0, 20.0), vec4<f32>(1.0),
+        vec4<f32>(0.0, 0.0, -1.0, -2.0), vec4<f32>(1.0, 10.0, 0.0, 20.0));
+    grid[0] = 0u;
+    calls = 0u;
+    let thin = (id.x & 1u) != 0u;
+    let back = (id.x & 2u) != 0u;
+    let shadows = (id.x & 4u) != 0u;
+    let n = vec3<f32>(0.0, 0.0, select(1.0, -1.0, back));
+    let value = lamp_light(vec3<f32>(0.0), n, n,
+        Surface(vec3<f32>(0.5), vec3<f32>(0.04), 0.6), thin, shadows);
+    output[id.x] = vec4<f32>(value, f32(calls));
+}
+"#);
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let renderer = pollster::block_on(Renderer::new_with(&instance, None,
+            Some(wgpu::TextureFormat::Rgba8UnormSrgb), RenderOptions::default())).unwrap();
+        let module = renderer.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("lamp receiver fixture"), source: wgpu::ShaderSource::Wgsl(shader.into()),
+        });
+        let pipeline = renderer.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("lamp receiver fixture"), layout: None, module: &module,
+            entry_point: Some("check"), compilation_options: Default::default(), cache: None,
+        });
+        let output = renderer.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lamp results"), size: 128,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC, mapped_at_creation: false,
+        });
+        let read = renderer.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("lamp readback"), size: 128,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false,
+        });
+        let group = renderer.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None, layout: &pipeline.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: output.as_entire_binding() }],
+        });
+        let mut encoder = renderer.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.dispatch_workgroups(8, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&output, 0, &read, 0, 128);
+        let submission = renderer.queue.submit([encoder.finish()]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        read.slice(..).map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+        wait_gpu(&renderer.device, Some(submission)).unwrap();
+        rx.recv().unwrap().unwrap();
+        let data = read.slice(..).get_mapped_range();
+        let values: &[[f32; 4]] = bytemuck::cast_slice(&data);
+        assert_eq!(values.iter().map(|v| v[3]).collect::<Vec<_>>(), [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0]);
+        for channel in 0..3 {
+            assert!(values[2][channel] > 1e-4, "back face must retain ground bounce");
+            assert_eq!(values[2][channel], values[6][channel], "bounce must stay unshadowed");
+            assert!(values[0][channel] > values[4][channel], "front face must retain its shadow");
+            assert!(values[3][channel] > values[7][channel] && values[7][channel] > 1e-4,
+                "foliage must retain shadowed backlighting");
+        }
+    }
+
     /// A textured material can have black diffuse but white ambient (depot interiors).
     /// Enhanced must not turn it into a black surface or silently replace its diffuse.
     #[test]

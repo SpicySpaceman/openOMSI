@@ -320,6 +320,9 @@ pub struct PointLight {
     /// A lamp in a housing - a street lamp's head, a platform's light (`[maplight]`): the
     /// enhanced path sends its light down and out, a few per cent above its horizon.
     pub housed: bool,
+    /// A virtual source embedded in a pole fixture. Its fixture cannot occlude
+    /// its own output; it remains a caster for other lamps and the sun.
+    pub shadow_owner: Option<i64>,
     /// Which path draws the light.
     pub mode: LightMode,
 }
@@ -336,6 +339,7 @@ impl Default for PointLight {
             core: 0.0,
             beam: 0.0,
             housed: false,
+            shadow_owner: None,
             mode: LightMode::Both,
         }
     }
@@ -493,6 +497,7 @@ struct LampShadow {
     index: u32,
     position: Vec3,
     range: f32,
+    owner: Option<i64>,
 }
 
 impl LampShadow {
@@ -1246,6 +1251,8 @@ pub struct Instance {
     /// it - except a spline standing clear of the ground (a bridge deck, an elevated
     /// railway), which is raised with `set_casts_shadow`.
     pub casts_shadow: bool,
+    /// Stable identity of a pole fixture hosting embedded virtual map lights.
+    pub shadow_owner: Option<i64>,
     /// Part of a vehicle whose roof lies this high over its origin (model frame): what faces
     /// up under the roof (the floor, the seats) is out of the weather - no snow nor wet on
     /// it. (Only the vehicle the camera is in was spared, by its box; every other bus showed
@@ -4751,6 +4758,7 @@ impl Renderer {
             omsi_caster: false,
             ordered: false,
             casts_shadow: true,
+            shadow_owner: None,
             roof: None,
         });
         if scene.bounds_known.get(mesh).copied().unwrap_or(false) {
@@ -4805,6 +4813,7 @@ impl Renderer {
             omsi_caster: false,
             ordered: false,
             casts_shadow: false,
+            shadow_owner: None,
             roof: None,
         });
         if scene.bounds_known.get(mesh).copied().unwrap_or(false) {
@@ -6174,7 +6183,7 @@ impl Renderer {
                     if scene.lamp_shadow_last.contains(&key) {
                         score *= 1.6;
                     }
-                    chosen.push((score, LampShadow { index: idx, position: p, range: l.radius }, key));
+                    chosen.push((score, LampShadow { index: idx, position: p, range: l.radius, owner: l.shadow_owner }, key));
                 }
             }
             for y in (y0.max(0.0) as usize)..=(y1.min(side as f32 - 1.0) as usize) {
@@ -9677,6 +9686,77 @@ mod tests {
         let (input, clouds) = enhanced_sky_input(&light(50_000.0, 1.0, 0.15), 1.0);
         assert_eq!(input.sun_visibility, 0.0);
         assert!((clouds - 0.15).abs() < 1e-6);
+    }
+
+    #[test]
+    #[ignore = "requires a graphics adapter; checks embedded fixture shadow isolation"]
+    fn embedded_map_light_keeps_external_and_other_light_shadows() {
+        let adapter = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let mut renderer = pollster::block_on(Renderer::new_with(
+            &adapter, None, Some(wgpu::TextureFormat::Rgba8UnormSrgb),
+            RenderOptions { msaa: 1, shadow_size: 2048, ssao: false, fxaa: false,
+                render_scale: 1.0, ..Default::default() },
+        )).unwrap();
+        let mut scene = renderer.new_scene();
+        let mat = renderer.add_material(&mut scene, None, AlphaMode::Opaque, [0.5, 0.5, 0.5, 1.0], false);
+        let mut quad = |x: f32, z: f32, radius: f32| {
+            let mesh = renderer.add_mesh(&mut scene, &MeshData {
+                positions: vec![Vec3::new(x-radius, -radius, z), Vec3::new(x+radius, -radius, z),
+                    Vec3::new(x+radius, radius, z), Vec3::new(x-radius, radius, z)],
+                normals: vec![Vec3::Z; 4], uvs: vec![glam::Vec2::ZERO; 4],
+                indices: vec![0, 1, 2, 0, 2, 3], ranges: vec![(0, 6, 0)], one_sided: false,
+            });
+            renderer.add_instance(&mut scene, mesh, DVec3::ZERO, Mat4::IDENTITY, vec![mat])
+        };
+        let ground = quad(0.0, 0.0, 5.0);
+        // Synthetic fixture cap close to its virtual source; an independent obstacle below.
+        let fixture = quad(0.0, 8.75, 0.125);
+        let obstacle = quad(1.0, 6.0, 0.2);
+        renderer.set_casts_shadow(&mut scene, ground, false);
+        scene.instances[fixture].shadow_owner = Some(1);
+        scene.instances[obstacle].shadow_owner = Some(2);
+        scene.lights = vec![PointLight {
+            position: DVec3::new(0.0, 0.0, 9.0), radius: 30.0, core: 5.0,
+            housed: true, shadow_owner: Some(1), ..Default::default()
+        }];
+        let camera = Camera { position: DVec3::new(0.0, -0.001, 5.0), yaw: 0.0, pitch: -89.99,
+            roll: 0.0, fov_deg: 90.0, near: 0.1, far: 100.0 };
+        let night = Lighting { enhanced: true, lamp_shadows: true, sun_dir: -Vec3::Z,
+            sun_intensity: 0.0, night: 1.0, shadows: false, detail: false,
+            fog_density: 0.0, ..Default::default() };
+        let pixel = |rgba: &[u8], x: usize| -> u8 { rgba[(64 * 128 + x) * 4] };
+        let fixed = renderer.render_to_image(&mut scene, 128, 128, &camera, &night).unwrap();
+        assert!(pixel(&fixed, 64) > pixel(&fixed, 102) + 20,
+            "emitting pool is lit, external obstacle still shadows: {} / {}", pixel(&fixed,64),pixel(&fixed,102));
+        scene.lights[0].shadow_owner = Some(3);
+        let foreign = renderer.render_to_image(&mut scene, 128, 128, &camera, &night).unwrap();
+        assert!(pixel(&fixed, 64) > pixel(&foreign, 64) + 20,
+            "fixture still blocks a different lamp: {} / {}", pixel(&fixed,64),pixel(&foreign,64));
+        scene.lights[0].shadow_owner = None;
+        let unowned = renderer.render_to_image(&mut scene, 128, 128, &camera, &night).unwrap();
+        assert_eq!(foreign, unowned, "unowned lights retain their shadows");
+        // Simultaneous maps must carry distinct caster lists, even for colocated lights.
+        scene.lights[0].shadow_owner = Some(1);
+        scene.lights.push(PointLight { shadow_owner: Some(3), ..scene.lights[0] });
+        let pair = renderer.render_to_image(&mut scene, 128, 128, &camera, &night).unwrap();
+        // The exposure meter sees both lights: swap equal lights in the same scene.
+        let foreign_cap = scene.instances[fixture].shadow_owner;
+        scene.instances[fixture].shadow_owner = Some(3);
+        let swapped = renderer.render_to_image(&mut scene, 128, 128, &camera, &night).unwrap();
+        assert!(pair.iter().zip(&swapped).all(|(a,b)| a.abs_diff(*b) <= 1),
+            "swapping equal lights preserves one lit and one occluded contribution (8-bit rounding)");
+        scene.instances[fixture].shadow_owner = None;
+        let both_blocked = renderer.render_to_image(&mut scene, 128, 128, &camera, &night).unwrap();
+        assert!(pixel(&pair,64) > pixel(&both_blocked,64) + 20, "own map is isolated from foreign map");
+        scene.instances[fixture].shadow_owner = foreign_cap;
+        scene.lights.clear();
+        let day = Lighting { enhanced: true, shadows: true, sun_dir: Vec3::Z,
+            fog_density: 0.0, detail: false, ..Default::default() };
+        let before = renderer.render_to_image(&mut scene, 128, 128, &camera, &day).unwrap();
+        scene.instances[fixture].shadow_owner = None;
+        scene.instances[obstacle].shadow_owner = None;
+        let after = renderer.render_to_image(&mut scene, 128, 128, &camera, &day).unwrap();
+        assert_eq!(before, after, "ownership does not change sun shadows");
     }
 
     #[test]

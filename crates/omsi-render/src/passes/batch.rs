@@ -428,7 +428,7 @@ impl Renderer {
     }
 
     /// OMSI_PROFILE: the frame's counts, and every ten seconds what each asset costs.
-    pub(crate) fn count_draws(&mut self, scene: &Scene, with_overlays: bool, visible: usize, plan: &DrawPlan, shadow_batches: &[Vec<Batch>; 4]) {
+    pub(crate) fn count_draws(&mut self, scene: &Scene, with_overlays: bool, visible: usize, plan: &DrawPlan, shadow_batches: &[Vec<Batch>; 7]) {
         let DrawPlan { main_batches, prepass_batches, main_draws, .. } = plan;
         if self.profiling && !with_overlays {
             let mut c = self.counts.borrow_mut();

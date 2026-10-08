@@ -312,6 +312,7 @@ fn push_spot(lights: &mut Vec<PointLight>, at: DVec3, d: Vec3, vals: &[f32; 12],
         // road lamp's profile is for one aimed along the road)
         beam: if d.normalize_or_zero().z.abs() >= 0.5 { 0.0 } else if vals[9] >= FULL_BEAM_RANGE { -1.0 } else { 1.0 },
         housed: false,
+        shadow_owner: None,
         mode: LightMode::Enhanced,
     });
 }

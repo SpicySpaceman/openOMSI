@@ -122,6 +122,11 @@ impl ApplicationHandler for App {
             // back count only when pressed anew)
             WindowEvent::KeyboardInput { is_synthetic, ref event, .. } if self.input.input_away || (is_synthetic && event.state == ElementState::Pressed) => {}
             WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } if self.input.input_away => {}
+            WindowEvent::ModifiersChanged(modifiers) => {
+                for code in input_script::release_inactive_modifiers(&mut self.input.keys, modifiers.state()) {
+                    self.on_key(event_loop, code, false, false);
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed && self.menus.menu_edit_icao {
                     if let Some(text)=event.text.as_deref(){ self.icao_edit_text(text); }

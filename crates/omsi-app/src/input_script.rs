@@ -1122,8 +1122,68 @@ pub(crate) fn key_left_free(scan: Option<i32>, action: &str, own: &std::collecti
     !scan.is_some_and(|s| own.contains(&s)) && !game.iter().any(|b| b.scan_code != 0 && b.action.eq_ignore_ascii_case(action))
 }
 
+/// OS shortcuts can consume modifier key-ups without taking window focus. Winit then
+/// reports the released modifiers through `ModifiersChanged` (on macOS, also before
+/// the next ordinary key event). Remove those stale keys and return them so their
+/// normal release handlers run, including vehicle keys and Shift+number door buttons.
+pub(crate) fn release_inactive_modifiers(
+    keys: &mut hashbrown::HashSet<KeyCode>,
+    modifiers: winit::keyboard::ModifiersState,
+) -> Vec<KeyCode> {
+    use winit::keyboard::ModifiersState as M;
+    let mut released = Vec::new();
+    for (flag, left, right) in [
+        (M::SHIFT, KeyCode::ShiftLeft, KeyCode::ShiftRight),
+        (M::CONTROL, KeyCode::ControlLeft, KeyCode::ControlRight),
+        (M::ALT, KeyCode::AltLeft, KeyCode::AltRight),
+        (M::SUPER, KeyCode::SuperLeft, KeyCode::SuperRight),
+    ] {
+        if !modifiers.contains(flag) {
+            for code in [left, right] {
+                if keys.remove(&code) { released.push(code); }
+            }
+        }
+    }
+    released
+}
+
 #[cfg(test)]
 mod key_tests {
+    use super::*;
+    use winit::keyboard::ModifiersState as M;
+
+    #[test]
+    fn screenshot_modifier_release_without_focus_loss_restores_wasd() {
+        // Captured on macOS: Shift down, Cmd down, screenshot, ModifiersChanged(empty),
+        // W down. There was no Focused(false) or modifier KeyboardInput release.
+        let mut keys: hashbrown::HashSet<KeyCode> = [KeyCode::ShiftLeft, KeyCode::SuperLeft].into();
+        assert!(keys.contains(&KeyCode::ShiftLeft)); // W would reach the wipers.
+        let released = release_inactive_modifiers(&mut keys, M::empty());
+        assert_eq!(released, [KeyCode::ShiftLeft, KeyCode::SuperLeft]);
+        keys.insert(KeyCode::KeyW);
+        assert!(!shift_held_now(&keys));
+        assert_eq!(fallback_action(KeyCode::KeyW, "wasd"), Some(omsi_sim::input::EngineAction::Throttle));
+        assert!(release_inactive_modifiers(&mut keys, M::empty()).is_empty());
+        assert!(keys.contains(&KeyCode::KeyW));
+    }
+
+    #[test]
+    fn modifier_state_preserves_held_chords_and_releases_both_sides() {
+        let mut keys = [KeyCode::ShiftLeft, KeyCode::ShiftRight, KeyCode::ControlRight,
+            KeyCode::AltRight, KeyCode::SuperRight, KeyCode::KeyW].into();
+        assert_eq!(release_inactive_modifiers(&mut keys, M::SHIFT | M::CONTROL),
+            [KeyCode::AltRight, KeyCode::SuperRight]);
+        assert!(shift_held_now(&keys));
+        assert!(keys.contains(&KeyCode::ControlRight));
+        assert_eq!(release_inactive_modifiers(&mut keys, M::empty()),
+            [KeyCode::ShiftLeft, KeyCode::ShiftRight, KeyCode::ControlRight]);
+        assert_eq!(keys, [KeyCode::KeyW].into());
+        // A modifier held while focus returns must not fabricate a new key press.
+        keys.clear();
+        assert!(release_inactive_modifiers(&mut keys, M::SHIFT).is_empty());
+        assert!(keys.is_empty());
+    }
+
     /// F1 given to a door and the driver's view moved to 1 (#701): F1 is not the view any more.
     #[test]
     fn a_built_in_view_key_steps_aside_for_the_players_own() {

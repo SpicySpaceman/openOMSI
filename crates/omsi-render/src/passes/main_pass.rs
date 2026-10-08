@@ -164,6 +164,10 @@ impl Renderer {
         // can hide the opaque geometry behind samples the colour pass leaves
         // uncovered (the sky then shows through buildings/terrain behind foliage).
         // The main alpha-tested pass writes matching depth as it draws the colour.
+        if self.profiling {
+            *self.counts.borrow_mut().entry("msaa prepass batches").or_default() +=
+                prepass_batches.iter().filter(|b| b.pipe / 2 != PIPE_ALPHA_TEST).count() as f64;
+        }
         encode_batches_filtered(
             &mut pass,
             scene,

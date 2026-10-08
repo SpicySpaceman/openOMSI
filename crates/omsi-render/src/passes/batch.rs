@@ -25,7 +25,10 @@ impl DrawPlan {
     /// Depth prefilling is shared by bundle planning and pass encoding so neither can
     /// omit the excavation prefix unless it will actually be drawn separately.
     pub(crate) fn msaa_prepass(&self, renderer: &Renderer, f: &FrameCtx) -> bool {
-        let needs = !cfg!(target_vendor = "apple") || self.main_batches.iter().chain(&self.cab_batches)
+        // Excavation covers have already been drawn when prefilling begins. They
+        // must not opt an otherwise opaque Apple view out of native surface removal.
+        let remaining = if self.has_presurface { &self.main_batches[self.presurface_batch_end..] } else { &self.main_batches };
+        let needs = !cfg!(target_vendor = "apple") || remaining.iter().chain(&self.cab_batches)
             .any(|b| matches!(b.pipe / 4, PIPE_ALPHA_TEST | PIPE_BLEND | PIPE_BLEND_NO_WRITE));
         renderer.prepass_msaa_pipelines.is_some()
             && (!self.has_presurface || renderer.presurface_msaa_pipelines.is_some())

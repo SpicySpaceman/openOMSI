@@ -925,6 +925,8 @@ pub struct AiFrame {
 }
 
 pub struct VehicleInstance {
+    /// Latest electronic destination selection waiting for the current animation.
+    pub(crate) pending_destination: Option<crate::timetable_run::PendingDestination>,
     /// `A_Trans_*` taken over OMSI's frames (see [`OmsiFrames`]).
     a_trans: OmsiFrames,
     pub ty: Arc<VehicleType>,
@@ -1240,6 +1242,7 @@ impl VehicleInstance {
             offs.iter().sum::<f32>() / offs.len().max(1) as f32
         };
         VehicleInstance {
+            pending_destination: None,
             a_trans: OmsiFrames::default(),
             particles: ParticleSet::new(ty.model.particle_systems(), std::ptr::addr_of!(host) as u64 ^ 0x9e37_79b9),
             light_fade: Vec::new(),
@@ -1318,6 +1321,7 @@ impl VehicleInstance {
         vars: &[(String, f32)],
         strings: &[(String, String)],
     ) -> (usize, usize) {
+        self.pending_destination = None;
         let mut numeric = 0;
         let mut textual = 0;
         for (name, value) in vars {
@@ -2353,6 +2357,7 @@ impl VehicleInstance {
         // (signed, as Omsi.exe 0x7e5163 adds it: reversing takes it back)
         self.driven_km += (self.physics.velocity_kmh() as f64 / 3600.0) * dt as f64;
         self.update_engine_vars(dt);
+        crate::timetable_run::apply_pending_destination(self);
         let p = self.ty.program.clone();
         self.vm.run_frame(&p, &mut self.state, &mut self.host);
         self.show_radio_text();
@@ -2418,6 +2423,7 @@ impl VehicleInstance {
     /// Run the scripts' frame once with no time passing (no physics, no clock): what a
     /// switch just pressed makes of the variables the scripts derive from it.
     pub fn update_scripts_only(&mut self, _dt: f32) {
+        crate::timetable_run::apply_pending_destination(self);
         let p = self.ty.program.clone();
         let gap = self.host.clock.timegap;
         self.host.clock.timegap = 0.0;
@@ -2576,6 +2582,7 @@ impl VehicleInstance {
         }
         self.run_collision_trigger();
         let p = self.ty.program.clone();
+        crate::timetable_run::apply_pending_destination(self);
         if p.frame_ai.is_empty() {
             self.vm.run_frame(&p, &mut self.state, &mut self.host);
         } else {

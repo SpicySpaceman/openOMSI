@@ -1189,6 +1189,9 @@ impl RenderPhase {
 }
 
 pub struct Instance {
+    /// Creation order, preserved when moved into a recycled GPU slot. Transparent
+    /// layers of one model must keep this order independently of their slot ids.
+    draw_order: u64,
     pub mesh: MeshId,
     /// Transform relative to `origin` (rotation/scale plus a small translation).
     pub transform: Mat4,
@@ -1336,6 +1339,7 @@ pub struct Scene {
     /// How many instances (and per-draw entries) the buffers hold; instances added since
     /// are appended to the buffers instead of rebuilding them, as long as they fit.
     uploaded_instances: usize,
+    next_instance_order: u64,
     uploaded_entries: u32,
     /// Instances whose transform or parameters changed since the last `prepare`: only
     /// their entries are rewritten. Rebuilding the whole per-draw buffer for 17 000 objects
@@ -3334,6 +3338,7 @@ impl Renderer {
             block_dirty: Vec::new(),
             block_cursor: 0,
             uploaded_instances: 0,
+            next_instance_order: 0,
             uploaded_entries: 0,
             cpu_models: Vec::new(),
             cpu_params: Vec::new(),
@@ -4836,7 +4841,10 @@ impl Renderer {
             .max()
             .map(|m| m as usize + 1)
             .unwrap_or(1);
+        let draw_order = scene.next_instance_order;
+        scene.next_instance_order += 1;
         scene.instances.push(Instance {
+            draw_order,
             mesh,
             transform,
             origin,
@@ -4891,7 +4899,10 @@ impl Renderer {
             .max()
             .map(|m| m as usize + 1)
             .unwrap_or(1);
+        let draw_order = scene.next_instance_order;
+        scene.next_instance_order += 1;
         scene.instances.push(Instance {
+            draw_order,
             mesh,
             transform,
             origin,

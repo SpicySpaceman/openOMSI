@@ -674,6 +674,7 @@ impl World {
                     extra.display = text_is_display(d.lightmap.is_some(), d.night.is_some());
                     // (the bus's own screen: no glow halo, no FXAA over its letters)
                     extra.screen = true;
+                    // Preserve authored self-illumination.
                     let m = renderer.add_material_extra(
                         scene,
                         Some(*tex),
@@ -684,7 +685,7 @@ impl World {
                         d.night,
                         d.lightmap,
                         None,
-                        [0.0; 3],
+                        d.emissive,
                         extra,
                     );
                     *x = gpu.material(renderer, scene, m);
